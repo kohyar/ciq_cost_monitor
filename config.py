@@ -157,6 +157,14 @@ DATABRICKS_WORKSPACES: list[DatabricksWorkspace] = _load_databricks_workspaces()
 # scrolls back in time.
 DATABRICKS_LOOKBACK_DAYS = 365
 
+# SKUs to exclude from the Databricks-jobs dashboard section. Useful for
+# pass-through line items billed separately (e.g. Anthropic's API charged
+# through Databricks but tracked elsewhere) that would double-count if
+# treated as Databricks compute.
+DATABRICKS_EXCLUDED_SKUS: set[str] = {
+    "PREMIUM_ANTHROPIC_MODEL_SERVING",
+}
+
 
 def databricks_configured() -> bool:
     return bool(DATABRICKS_WORKSPACES)

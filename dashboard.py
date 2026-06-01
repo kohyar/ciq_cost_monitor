@@ -29,6 +29,7 @@ except (FileNotFoundError, AttributeError):
 
 from config import (  # noqa: E402
     AZURE_BLOB_SAS_URL,
+    DATABRICKS_EXCLUDED_SKUS,
     DATABRICKS_LOOKBACK_DAYS,
     DATABRICKS_WORKSPACE_TO_ENV,
     DB_PATH,
@@ -635,6 +636,10 @@ if databricks_configured():
             .map(DATABRICKS_WORKSPACE_TO_ENV)
             .fillna("ws-" + _dbx_full["workspace_id"].astype(str))
         )
+        # Drop SKUs that are pass-through line items tracked elsewhere
+        # (Anthropic API, etc.) — see DATABRICKS_EXCLUDED_SKUS in config.
+        if DATABRICKS_EXCLUDED_SKUS:
+            _dbx_full = _dbx_full[~_dbx_full["sku_name"].isin(DATABRICKS_EXCLUDED_SKUS)]
 
         _dbx_window = _dbx_full
         if dbx_envs:
