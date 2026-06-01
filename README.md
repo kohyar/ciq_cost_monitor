@@ -159,6 +159,33 @@ in this file).
   selected window, sorted descending.
 - **Databricks breakdown** by `MeterSubCategory` (All-Purpose / Jobs /
   SQL / …).
+- **Databricks jobs (informational)** — **drill-down only**, shown when
+  Databricks SQL credentials are configured (see two patterns below).
+  **Loaded at dashboard runtime, not via `python ingest.py`** — the SQL
+  warehouse query is fast (~1 s) and Streamlit caches the result for 10
+  minutes. Source: `system.billing.usage` × `system.billing.list_prices`
+  × (when granted) `system.lakeflow.jobs`. **NOT added to any totals**
+  — these costs are already in the Azure "databricks" service family
+  rollup; this is just to show *which jobs* drove that spend. Section
+  honors the sidebar environment filter via a `workspace_id →
+  environment` mapping in `config.py`. Workload labels follow this
+  precedence: `<job name>` → `(unnamed job <id>)` → `interactive-<cluster_id>`
+  → `sql-warehouse-<warehouse_id>` → `sku-<name>`.
+
+  Two ways to configure source workspaces:
+  - **Single warehouse** (shared metastore) — set `DATABRICKS_HOST` /
+    `DATABRICKS_HTTP_PATH` / `DATABRICKS_TOKEN`. One query returns all
+    workspaces' rows (workspace_id filtered downstream).
+  - **Per-workspace** (separate metastores) — set
+    `DATABRICKS_CIQ_DEV_*` / `DATABRICKS_CIQ_STAGING_*` /
+    `DATABRICKS_CIQ_PROD_*` / `DATABRICKS_FORECASTER_DEV_*` (HOST /
+    HTTP_PATH / TOKEN each). Workspaces with all three set get queried
+    and merged.
+
+  To find out which one applies, run
+  `SELECT DISTINCT workspace_id FROM system.billing.usage` in your CIQ-dev
+  SQL editor. Four distinct IDs → shared metastore (Single is enough).
+  One ID → separate metastores (use Per-workspace).
 - **Anomalies** — any `(environment, service_family)` whose latest-day
   spend exceeds 2× its trailing 7-day average.
 

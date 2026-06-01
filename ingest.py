@@ -207,6 +207,7 @@ def main() -> int:
             except (AuthError, CostApiError) as e:
                 log.error("Failed for %s: %s", sub.name, e)
                 summaries.append({"subscription": sub.name, "error": str(e)})
+
     finally:
         con.close()
 

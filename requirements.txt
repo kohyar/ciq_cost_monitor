@@ -1,5 +1,6 @@
 azure-identity>=1.17.0
 azure-storage-blob>=12.20.0
+databricks-sql-connector>=3.0.0
 requests>=2.32.0
 duckdb>=1.0.0
 streamlit>=1.36.0

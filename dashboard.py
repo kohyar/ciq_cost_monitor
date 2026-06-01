@@ -27,7 +27,13 @@ try:
 except (FileNotFoundError, AttributeError):
     pass  # secrets.toml not present — fine for local dev
 
-from config import AZURE_BLOB_SAS_URL, DB_PATH  # noqa: E402
+from config import (  # noqa: E402
+    AZURE_BLOB_SAS_URL,
+    DATABRICKS_LOOKBACK_DAYS,
+    DATABRICKS_WORKSPACE_TO_ENV,
+    DB_PATH,
+    databricks_configured,
+)
 from db import ensure_local_db  # noqa: E402
 
 st.set_page_config(page_title="CIQ Azure Cost Monitor", layout="wide")
@@ -72,13 +78,13 @@ def _require_login() -> None:
 
 _require_login()
 
-CIQ_ENVS = ["dev", "staging", "prod"]
+CIQ_ENVS = ["ciq-dev", "ciq-staging", "ciq-prod"]
 FORECASTER_ENVS = ["forecaster-dev"]
 ENV_ORDER = CIQ_ENVS + FORECASTER_ENVS
 ENV_COLORS = {
-    "dev": "#3b82f6",
-    "staging": "#f59e0b",
-    "prod": "#ef4444",
+    "ciq-dev": "#3b82f6",
+    "ciq-staging": "#f59e0b",
+    "ciq-prod": "#ef4444",
     "forecaster-dev": "#8b5cf6",
 }
 
@@ -169,6 +175,28 @@ def last_ingest(db_path: str):
         return row[0] if row else None
 
 
+@st.cache_data(ttl=600, show_spinner="Loading Databricks job costs…")
+def load_databricks_jobs() -> pd.DataFrame:
+    """Live fetch from Databricks SQL warehouse (NOT from DuckDB).
+
+    Returns an empty DataFrame when Databricks isn't configured, the
+    warehouse is unreachable, or the user lacks permissions — the
+    dashboard section just disappears in that case. Cached for 10 min
+    so a wave of viewers doesn't spam the warehouse.
+    """
+    from config import databricks_configured
+    if not databricks_configured():
+        return pd.DataFrame()
+    try:
+        from databricks_client import fetch_job_costs
+        rows = fetch_job_costs()
+    except Exception as exc:
+        # Surface as a warning but don't break the rest of the dashboard.
+        st.warning(f"Databricks job-cost fetch failed: {exc}")
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 # ----- helpers -------------------------------------------------------------
 
 def _fmt_usd(value: float | None) -> str:
@@ -200,6 +228,7 @@ daily = load_daily(str(DB_PATH))
 monthly = load_monthly(str(DB_PATH))
 forecast = load_forecast(str(DB_PATH))
 last_run = last_ingest(str(DB_PATH))
+# dbx_jobs is fetched lazily inside its section when the user clicks Load.
 
 if daily.empty:
     st.warning("No data in `azure_costs` yet. Run `python ingest.py --backfill 90`.")
@@ -537,6 +566,124 @@ else:
         .properties(height=max(120, 28 * len(dbx_breakdown)))
     )
     st.altair_chart(chart, use_container_width=True)
+
+# ---- Databricks jobs (informational drill-down) ---------------------------
+# These costs are ALREADY included in the Azure rollup under the "databricks"
+# service family — never sum them into totals. This section is just per-job
+# attribution for the spend you already see above.
+
+if databricks_configured():
+    st.subheader("Databricks jobs — per-workload spend (informational)")
+    st.caption(
+        "Already counted in Azure totals under the `databricks` service "
+        "family. Shown separately so you can see which jobs / clusters "
+        "drive the spend. Source: `system.billing.usage` × "
+        "`system.billing.list_prices` × `system.lakeflow.jobs`. "
+        "Data is fetched live from the SQL warehouse on demand."
+    )
+
+    # ---- Section-local filters (independent of the sidebar) --------------
+    # Environment options come from the workspace_id → env mapping so the
+    # multiselect works before any data has been fetched. Date bounds use
+    # the configured lookback window (the SQL query won't return rows
+    # outside it anyway).
+    _env_options = sorted(set(DATABRICKS_WORKSPACE_TO_ENV.values()))
+    _today = date.today()
+    _date_min = _today - timedelta(days=DATABRICKS_LOOKBACK_DAYS)
+
+    _f1, _f2, _f3 = st.columns([2, 1, 1])
+    with _f1:
+        dbx_envs = st.multiselect(
+            "Environment",
+            options=_env_options,
+            default=_env_options,
+            key="dbx_env_filter",
+        )
+    with _f2:
+        dbx_start = st.date_input(
+            "Start date",
+            value=_today - timedelta(days=90),
+            min_value=_date_min,
+            max_value=_today,
+            key="dbx_start_filter",
+        )
+    with _f3:
+        dbx_end = st.date_input(
+            "End date",
+            value=_today,
+            min_value=_date_min,
+            max_value=_today,
+            key="dbx_end_filter",
+        )
+
+    # Single button: force-refresh the warehouse query. Without a click the
+    # @st.cache_data cache (10 min TTL) is used; with a click the cache is
+    # cleared so the next read goes back to the warehouse.
+    if st.button("Refresh data", key="dbx_load_btn"):
+        load_databricks_jobs.clear()
+
+    # Always fetch on page render. First call costs ~1–3 s against the
+    # warehouse; subsequent reruns (filter changes, etc.) hit the cache.
+    dbx_jobs = load_databricks_jobs()
+    if dbx_jobs.empty:
+        st.info("Databricks SQL warehouse returned no rows.")
+    else:
+        _dbx_full = dbx_jobs.copy()
+        _dbx_full["usage_date"] = pd.to_datetime(_dbx_full["usage_date"]).dt.date
+        _dbx_full["environment"] = (
+            _dbx_full["workspace_id"].astype(str)
+            .map(DATABRICKS_WORKSPACE_TO_ENV)
+            .fillna("ws-" + _dbx_full["workspace_id"].astype(str))
+        )
+
+        _dbx_window = _dbx_full
+        if dbx_envs:
+            _dbx_window = _dbx_window[_dbx_window["environment"].isin(dbx_envs)]
+        if dbx_start and dbx_end:
+            if dbx_start > dbx_end:
+                st.warning("Start date is after end date — no rows will match.")
+            _dbx_window = _dbx_window[
+                (_dbx_window["usage_date"] >= dbx_start)
+                & (_dbx_window["usage_date"] <= dbx_end)
+            ]
+
+        if _dbx_window.empty:
+            st.info("No Databricks job data in the selected window / environment.")
+        else:
+            # Per-environment totals so you can see the split across workspaces.
+            _by_env = (
+                _dbx_window.groupby("environment", dropna=False)["cost_usd"]
+                .sum().reset_index().sort_values("cost_usd", ascending=False)
+            )
+            env_totals_str = " · ".join(
+                f"**{row['environment']}**: {_fmt_usd(row['cost_usd'])}"
+                for _, row in _by_env.iterrows()
+            )
+            st.caption(f"By environment — {env_totals_str}")
+
+            _by_workload = (
+                _dbx_window.groupby(["environment", "workload"], dropna=False)
+                .agg(
+                    total_dbus=("total_dbus", "sum"),
+                    cost_usd=("cost_usd", "sum"),
+                    first_day=("usage_date", "min"),
+                    last_day=("usage_date", "max"),
+                )
+                .reset_index()
+                .sort_values("cost_usd", ascending=False)
+            )
+            total_dbx_spend = float(_by_workload["cost_usd"].sum())
+            st.caption(
+                f"Total DBU spend in window: **{_fmt_usd(total_dbx_spend)}** "
+                f"across {len(_by_workload)} workloads."
+            )
+
+            _top = _by_workload.head(20).copy()
+            _top["cost_usd"] = _top["cost_usd"].map(_fmt_usd)
+            _top["total_dbus"] = _top["total_dbus"].map(lambda v: f"{v:,.2f}")
+            _top["first_day"] = pd.to_datetime(_top["first_day"]).dt.strftime("%Y-%m-%d")
+            _top["last_day"]  = pd.to_datetime(_top["last_day"]).dt.strftime("%Y-%m-%d")
+            st.dataframe(_top, hide_index=True, use_container_width=True)
 
 # ---- Anomaly table --------------------------------------------------------
 

@@ -35,9 +35,9 @@ def _required_env(name: str) -> str:
 
 
 SUBSCRIPTIONS: list[Subscription] = [
-    Subscription(name="ciq-dev", id=_required_env("CIQ_DEV_SUB_ID"), environment="dev"),
-    Subscription(name="ciq-staging", id=_required_env("CIQ_STAGING_SUB_ID"), environment="staging"),
-    Subscription(name="ciq-prod", id=_required_env("CIQ_PROD_SUB_ID"), environment="prod"),
+    Subscription(name="ciq-dev", id=_required_env("CIQ_DEV_SUB_ID"), environment="ciq-dev"),
+    Subscription(name="ciq-staging", id=_required_env("CIQ_STAGING_SUB_ID"), environment="ciq-staging"),
+    Subscription(name="ciq-prod", id=_required_env("CIQ_PROD_SUB_ID"), environment="ciq-prod"),
     Subscription(
         name="forecaster-dev",
         id=_required_env("FORECASTER_DEV_SUB_ID"),
@@ -80,3 +80,83 @@ DB_PATH = Path(os.getenv("COST_DB_PATH", PROJECT_ROOT / "costs.duckdb"))
 #   * dashboard.py downloads it on startup when the local file is missing
 #     (so the same dashboard.py works locally AND on Streamlit Cloud).
 AZURE_BLOB_SAS_URL = os.getenv("AZURE_BLOB_SAS_URL", "").strip() or None
+
+# Databricks SQL warehouses, used to pull `system.billing.usage` for
+# per-job DBU attribution. Two config patterns are supported:
+#
+#   1. PER-WORKSPACE (preferred): set DATABRICKS_<NAME>_HOST /
+#      _HTTP_PATH / _TOKEN for each workspace you want to ingest from.
+#      Workspaces with all three set show up in DATABRICKS_WORKSPACES.
+#      Use this when your workspaces have separate metastores.
+#
+#   2. LEGACY single-workspace: set DATABRICKS_HOST / DATABRICKS_HTTP_PATH
+#      / DATABRICKS_TOKEN. Treated as one workspace named "default". If
+#      your 4 workspaces share one metastore, one connection is enough —
+#      system.billing.usage rows carry workspace_id so all 4 are visible.
+#
+# These costs are NEVER summed into Azure totals — they're a drill-down
+# of the existing "databricks" service family rollup.
+
+@dataclass(frozen=True)
+class DatabricksWorkspace:
+    name: str       # friendly label used in logs and the summary table
+    host: str       # adb-XXXXXXXXXXXXXXXX.NN.azuredatabricks.net
+    http_path: str  # /sql/1.0/warehouses/...
+    token: str      # PAT (or rotate to OAuth M2M later)
+
+
+# Workspace_id (Azure Databricks workspace id) → environment label the
+# dashboard already uses for filtering. Add new workspaces here when
+# spinning them up. workspace_id appears in every row of
+# system.billing.usage so this mapping lets the dashboard's env filter
+# also apply to the Databricks-jobs section.
+DATABRICKS_WORKSPACE_TO_ENV: dict[str, str] = {
+    "8346278133268666": "ciq-dev",
+    "4272234136902058": "ciq-staging",
+    "3064739478924637": "ciq-prod",
+    "8911757934082442": "forecaster-dev",
+}
+
+
+def _load_databricks_workspaces() -> list[DatabricksWorkspace]:
+    workspaces: list[DatabricksWorkspace] = []
+    # Per-workspace pattern first.
+    for prefix, label in (
+        ("DATABRICKS_CIQ_DEV", "ciq-dev"),
+        ("DATABRICKS_CIQ_STAGING", "ciq-staging"),
+        ("DATABRICKS_CIQ_PROD", "ciq-prod"),
+        ("DATABRICKS_FORECASTER_DEV", "forecaster-dev"),
+    ):
+        host = os.getenv(f"{prefix}_HOST", "").strip()
+        http_path = os.getenv(f"{prefix}_HTTP_PATH", "").strip()
+        token = os.getenv(f"{prefix}_TOKEN", "").strip()
+        if host and http_path and token:
+            workspaces.append(
+                DatabricksWorkspace(name=label, host=host, http_path=http_path, token=token)
+            )
+
+    # Legacy single-workspace pattern (kept so an existing .env doesn't
+    # break). Only used when no per-workspace creds are present.
+    if not workspaces:
+        host = os.getenv("DATABRICKS_HOST", "").strip()
+        http_path = os.getenv("DATABRICKS_HTTP_PATH", "").strip()
+        token = os.getenv("DATABRICKS_TOKEN", "").strip()
+        if host and http_path and token:
+            workspaces.append(
+                DatabricksWorkspace(name="default", host=host, http_path=http_path, token=token)
+            )
+
+    return workspaces
+
+
+DATABRICKS_WORKSPACES: list[DatabricksWorkspace] = _load_databricks_workspaces()
+
+# Window for the Databricks job query. `system.billing.usage` carries
+# ~365 days of history; we ask for the full year so the dashboard's
+# date picker can range freely without re-querying when the user
+# scrolls back in time.
+DATABRICKS_LOOKBACK_DAYS = 365
+
+
+def databricks_configured() -> bool:
+    return bool(DATABRICKS_WORKSPACES)
