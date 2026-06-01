@@ -602,7 +602,7 @@ if databricks_configured():
     with _f2:
         dbx_start = st.date_input(
             "Start date",
-            value=_today - timedelta(days=90),
+            value=_today - timedelta(days=30),
             min_value=_date_min,
             max_value=_today,
             key="dbx_start_filter",
