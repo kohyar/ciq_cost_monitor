@@ -727,3 +727,13 @@ else:
         use_container_width=True,
     )
     st.caption(f"Anomalies for {latest_day}")
+
+# ---- footer ---------------------------------------------------------------
+
+st.divider()
+st.caption(
+    "Figures are sourced directly from the **Azure Cost Management API** "
+    "(AmortizedCost, USD). Other costs — including the **Microsoft support "
+    "plan**, **SSL certificates**, and **domain registration** — are **not** "
+    "reflected here."
+)
