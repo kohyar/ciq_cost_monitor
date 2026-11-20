@@ -45,6 +45,18 @@ SUBSCRIPTIONS: list[Subscription] = [
     ),
 ]
 
+# Environments that were shut down. Their cost history stays in the data,
+# but they no longer count toward the run-rate estimate.
+DECOMMISSIONED_ENVS: dict[str, str] = {
+    "ciq-prod": "Decommissioned in Nov 2026. Production traffic now points to ciq-staging.",
+}
+
+# Costs billed outside Azure, in USD per year.
+OTHER_COSTS: list[dict] = [
+    {"item": "cultivateiq.org SSL certificate", "product": "CIQ", "annual_usd": 120.0},
+    {"item": "cultivateiq.org domain registration", "product": "CIQ", "annual_usd": 25.0},
+]
+
 # Cost Management API
 COST_API_VERSION = "2023-11-01"
 COST_API_BASE = "https://management.azure.com"

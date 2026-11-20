@@ -33,6 +33,8 @@ from config import (  # noqa: E402
     DATABRICKS_LOOKBACK_DAYS,
     DATABRICKS_WORKSPACE_TO_ENV,
     DB_PATH,
+    DECOMMISSIONED_ENVS,
+    OTHER_COSTS,
     databricks_configured,
 )
 from db import ensure_local_db  # noqa: E402
@@ -256,10 +258,13 @@ st.caption(" · ".join(caption_bits))
 
 with st.sidebar:
     st.header("Filters")
+    env_options = ["all"] + [e for e in ENV_ORDER if e in set(daily["environment"].dropna())]
+    # Allow ?env=<name> so a filtered view can be linked or exported
+    requested_env = st.query_params.get("env", "all")
     env_choice = st.selectbox(
         "Environment",
-        options=["all"] + [e for e in ENV_ORDER if e in set(daily["environment"].dropna())],
-        index=0,
+        options=env_options,
+        index=env_options.index(requested_env) if requested_env in env_options else 0,
     )
     default_start = max(data_min, today - timedelta(days=29))
     date_range = st.date_input(
@@ -333,6 +338,9 @@ forecast_by_env = (
     if not forecast.empty
     else pd.Series(dtype=float)
 )
+# Azure keeps forecasting shut-down environments; nothing more will be billed
+for _env in DECOMMISSIONED_ENVS:
+    forecast_by_env[_env] = float(mtd_by_env.get(_env, 0.0))
 
 
 def _delta_str(curr: float, prev: float) -> str:
@@ -361,7 +369,7 @@ def _build_summary_table(envs: list[str], total_label: str | None) -> pd.DataFra
     rows = []
     for env in envs:
         rows.append(_row_for_env(
-            env,
+            f"{env} (decommissioned)" if env in DECOMMISSIONED_ENVS else env,
             float(mtd_by_env.get(env, 0.0)),
             float(prev_by_env.get(env, 0.0)),
             float(last_year_by_env.get(env, 0.0)),
@@ -417,6 +425,66 @@ st.caption(
     f"avg ÷ {current_year_completed_months}. The in-progress current month is excluded entirely "
     "so the Total and Avg are computed over the same set of months — look at the MTD column "
     "for the in-progress month's spend so far."
+)
+for _env, _note in DECOMMISSIONED_ENVS.items():
+    st.info(f"**{_env}**: {_note} Its projected month-end is shown as its MTD spend, "
+            "and it is left out of the run-rate estimate below.")
+
+# ---- Other costs + monthly run-rate estimate ------------------------------
+
+st.subheader("Other costs (billed outside Azure)")
+other_df = pd.DataFrame(OTHER_COSTS)
+if not other_df.empty:
+    other_df["monthly_usd"] = other_df["annual_usd"] / 12
+    st.dataframe(
+        other_df.rename(columns={
+            "item": "Item", "product": "Product",
+            "annual_usd": "Per year", "monthly_usd": "Per month",
+        }).assign(**{
+            "Per year": lambda d: d["Per year"].map(_fmt_usd),
+            "Per month": lambda d: d["Per month"].map(_fmt_usd),
+        }),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+def _other_monthly(product: str) -> float:
+    if other_df.empty:
+        return 0.0
+    return float(other_df.loc[other_df["product"] == product, "monthly_usd"].sum())
+
+
+st.subheader("Estimated monthly run cost")
+active_ciq = [e for e in CIQ_ENVS if e not in DECOMMISSIONED_ENVS]
+estimate_rows = []
+for env in active_ciq + FORECASTER_ENVS:
+    proj = forecast_by_env.get(env)
+    estimate_rows.append({
+        "Item": env,
+        "Product": "CIQ" if env in CIQ_ENVS else "Forecaster",
+        "Per month": float(proj) if proj is not None and not pd.isna(proj) else 0.0,
+    })
+for row in OTHER_COSTS:
+    estimate_rows.append({
+        "Item": row["item"], "Product": row["product"], "Per month": row["annual_usd"] / 12,
+    })
+estimate_df = pd.DataFrame(estimate_rows)
+ciq_total = float(estimate_df.loc[estimate_df["Product"] == "CIQ", "Per month"].sum())
+fc_total = float(estimate_df.loc[estimate_df["Product"] == "Forecaster", "Per month"].sum())
+_m1, _m2, _m3 = st.columns(3)
+_m1.metric("CIQ / month", _fmt_usd(ciq_total))
+_m2.metric("Forecaster / month", _fmt_usd(fc_total))
+_m3.metric("Combined / month", _fmt_usd(ciq_total + fc_total))
+st.dataframe(
+    estimate_df.assign(**{"Per month": estimate_df["Per month"].map(_fmt_usd)}),
+    hide_index=True,
+    use_container_width=True,
+)
+st.caption(
+    "Azure lines use this month's projected month-end as the run rate. "
+    "Other costs are the yearly price divided by 12. "
+    + " ".join(f"{e} is excluded ({n})" for e, n in DECOMMISSIONED_ENVS.items())
 )
 
 st.divider()
@@ -733,7 +801,7 @@ else:
 st.divider()
 st.caption(
     "Figures are sourced directly from the **Azure Cost Management API** "
-    "(AmortizedCost, USD). Other costs — including the **Microsoft support "
-    "plan**, **SSL certificates**, and **domain registration** — are **not** "
-    "reflected here."
+    "(AmortizedCost, USD), except the **SSL certificate** and **domain "
+    "registration**, which are listed under Other costs. The **Microsoft "
+    "support plan** is **not** reflected here."
 )
